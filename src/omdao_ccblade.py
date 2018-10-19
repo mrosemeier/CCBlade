@@ -8,7 +8,7 @@ from scipy.optimize import optimize
 
 class CCBladeEvaluator(Component):
 
-    def __init__(self, config, sdim, nalpha, nv):
+    def __init__(self, config, sdim, nalpha, nv, naero_coeffs):
         super(CCBladeEvaluator, self).__init__()
 
         self.sdim = sdim
@@ -17,6 +17,21 @@ class CCBladeEvaluator(Component):
         self.nalpha = nalpha
 
         self.nv = nv
+
+        # standard values for cp lambda curves
+        self.tsr_cp_start = 1
+        self.tsr_cp_end = 18
+        self.ntsr_cp = 100
+        self.pitches_cp_start = 0
+        self.pitches_cp_end = 30
+        self.npitches_cp = 10
+
+        #self.blend_var = config['CCBlade']['blend_var']
+
+        self.af_name_base = 'cs_'
+        self.af_name_suffix = '_aerodyn'
+
+        self.naero_coeffs = naero_coeffs
 
         for k, w in config['CCBlade'].iteritems():
             try:
@@ -53,6 +68,8 @@ class CCBladeEvaluator(Component):
             'n_cs_alpha', np.zeros((self.nsec, self.nre, self.nmet)).astype(int))
         self.add_param('cs_polars_tc', np.zeros((self.nsec)))
 
+        self.add_param('airfoildata:blend_var', np.zeros(self.naero_coeffs))
+
     def _init_unknowns(self):
         self.add_output('pitch_v', np.zeros((self.nv)))
         self.add_output('aeloads_v', np.zeros((self.nsec, 2, self.nv)))
@@ -60,13 +77,22 @@ class CCBladeEvaluator(Component):
         self.add_output('cp_v', np.zeros((self.nv)))
         self.add_output('tsr_v', np.zeros((self.nv)))
         self.add_output('v', np.zeros((self.nv)))
+        self.add_output('P_v', np.zeros((self.nv)))
 
         self.add_output('load_cases_aero', np.zeros((self.nv, self.nsec, 15)))
         self.add_output('load_cases_gravity', np.zeros((self.nv, 1, 15)))
         self.add_output('load_cases_align', np.zeros((self.nv, 5)))
 
+        self.add_output('r_stat', np.zeros((self.nsec)))
+
         #self.add_output('load_cases_aero_ult', np.zeros((2, self.nsec, 15)))
         #self.add_output('load_cases_align_ult', np.zeros((2, 5)))
+
+        self.add_output('tsr_cp', np.zeros((self.ntsr_cp)))
+        self.add_output('CP_cp', np.zeros((self.ntsr_cp, self.npitches_cp)))
+        self.add_output('CT_cp', np.zeros((self.ntsr_cp, self.npitches_cp)))
+        self.add_output('CQ_cp', np.zeros((self.ntsr_cp, self.npitches_cp)))
+        self.add_output('pitches_cp', np.zeros((self.npitches_cp)))
 
     def solve_nonlinear(self, params, unknowns, resids):
 
@@ -75,9 +101,24 @@ class CCBladeEvaluator(Component):
         z = params['z_st'] * params['blade_length']
         self.r = z + self.Rhub
 
+        # First and last section need to be shifted if they coincide with the
+        # root/tip
+        dr01 = self.r[1] - self.r[0]
+        rnode1 = self.r[0] + 0.5 * dr01
+        rnode0 = self.r[0]
+        self.r[0] = 0.5 * (rnode1 + rnode0)  # override root value
+
+        dr_2_1 = self.r[-1] - self.r[-2]
+        rnode_2 = self.r[-2] + 0.5 * dr_2_1
+        rnode_1 = self.r[-1]
+        self.r[-1] = 0.5 * (rnode_1 + rnode_2)  # override tip value
+
+        unknowns['r_stat'] = self.r
+
         # Workaround to fix nan calculated by CCblade
-        self.r[0] = self.Rhub + 1.0E-11
-        self.r[-1] = self.Rtip - 1.0E-11
+        # obsolete
+        # self.r[0] = self.Rhub + 1.0E-11
+        # self.r[-1] = self.Rtip - 1.0E-11
 
         rot_z = params['rot_z_st']
         # twist angle
@@ -88,6 +129,18 @@ class CCBladeEvaluator(Component):
         #    file_planform, skiprows=13, usecols=(0, 1, 3, 4))
         self.chord = params['chord_st'] * params['blade_length']
 
+        self.blend_var = params['airfoildata:blend_var']
+        self.af = []
+        # init from aerodyn files
+        for i, tc in enumerate(self.blend_var):
+
+            af_name = self.af_name_base + \
+                '%03d_%04d' % (i, tc * 1000) + self.af_name_suffix
+
+            self.af.append(CCAirfoil.initFromAerodynFile(af_name + '.dat'))
+
+        # alternative input
+        '''
         # load all airfoils
         pol = params['cs_polars']  # prob.root.unknowns['af_data']
 
@@ -105,7 +158,7 @@ class CCBladeEvaluator(Component):
         n_cs_alpha = params['n_cs_alpha']
 
         # convert to CCAirfoil
-        self.af = []
+        
         for nsec in range(naf):  # [0, 1, 2, 3, 4, 5, 6, 7]:  #
             re = self.res  # Reynolds numbers where airfoil data are defined
             mins = []
@@ -130,20 +183,20 @@ class CCBladeEvaluator(Component):
                 cd[:, rey] = np.interp(alpha, pol[:n_cs_alpha[nsec, rey, nmet], 0, nsec, rey, nmet], pol[
                     :n_cs_alpha[nsec, rey, nmet], 2, nsec, rey, nmet])
             self.af.append(CCAirfoil(alpha, re, cl, cd))
-
+        '''
         # create CCBlade object
         self.rotor = CCBlade(self.r, self.chord, self.theta, self.af, self.Rhub, self.Rtip, self.B, self.rho, self.mu, self.precone, self.tilt, self.yaw, self.shearExp, self.hubHt, self.nSector,
                              presweepTip=0.0, wakerotation=self.wakerotation, usecd=self.usecd, tiploss=self.tiploss, hubloss=self.hubloss, iterRe=self.iterRe)
 
         # find tsr opt
-        cp_opt, tsr_opt = self.evaluate_cp_lambda()
-        lambda_opt = tsr_opt[0]
+        cp_opt, tsr_opt, tsr_cp, CP_cp, CT_cp, CQ_cp, pitches_cp = self.evaluate_cp_lambda()
+        lambda_opt = tsr_opt[0]  # at pitch zero
 
         # create wind speed vector
         U_oper = np.linspace(self.Uin, self.Uout, self.nv)
 
         # create operating conditions
-        pitch_angles, cp, aeloads, tsr, omega = self.evaluate_steady_states(
+        pitch_angles, cp, aeloads, tsr, omega, P = self.evaluate_steady_states(
             P_elec=self.P_elec, eta_elec=self.eta_elec, lambda_opt=lambda_opt, OmegaMin=self.OmegaMin, OmegaMax=self.OmegaMax, U_oper=U_oper)
         # self.pp.close()
 
@@ -191,12 +244,13 @@ class CCBladeEvaluator(Component):
             V_e50, pitch_dlc61, yaw_errors)
 
         # shift data to unknowns
-        unknowns['pitch_v'] = - pitch_angles  # positive along pitch z axis
+        unknowns['pitch_v'] = - pitch_angles  # convert positive along z axis
         unknowns['aeloads_v'] = aeloads
         unknowns['omega_v'] = omega
         unknowns['cp_v'] = cp
         unknowns['tsr_v'] = tsr
         unknowns['v'] = U_oper
+        unknowns['P_v'] = P
 
         # convert to FEPROC load case which need to be applied on t/4 point
         # x,y,z,rotx,roty,rotz,Fx,Fy,Fz,Mx,My,Mz,ax,ay,az
@@ -233,16 +287,21 @@ class CCBladeEvaluator(Component):
 
         #    unknowns['load_cases_align_ult'][
         #        i, 1] = - pitch_dlc61  # positive along z
+        unknowns['tsr_cp'] = tsr_cp
+        unknowns['CP_cp'] = CP_cp
+        unknowns['CT_cp'] = CT_cp
+        unknowns['CQ_cp'] = CQ_cp
+        unknowns['pitches_cp'] = - pitches_cp  # convert positive along z axis
 
     def evaluate_cp_lambda(self):
-
-        tsr = np.linspace(1, 18, 100)
+        tsr = np.linspace(self.tsr_cp_start, self.tsr_cp_end, self.ntsr_cp)
         Omega = 10.0 * np.ones_like(tsr)
         Uinf = Omega * np.pi / 30.0 * self.Rtip / tsr
 
         # pitch = np.zeros_like(tsr)
 
-        pitches = np.linspace(0, 30, 10)
+        pitches = np.linspace(self.pitches_cp_start,
+                              self.pitches_cp_end, self.npitches_cp)
 
         cp_opt = np.zeros_like(pitches)
         tsr_opt = np.zeros_like(pitches)
@@ -262,19 +321,8 @@ class CCBladeEvaluator(Component):
 
         #TSR_excel = excel_coeff[:, 0]
         #CP_excel = excel_coeff[:, 1]
-        plot = False
-        if plot:
-            plt.figure()
-            for i, pitch in enumerate(pitches):
-                plt.plot(tsr, CP[:, i], label='%s' % pitch)
-            #plt.plot(TSR_excel, CP_excel, label='Reference simulated')
-            plt.xlabel('$\lambda$')
-            plt.ylabel('$c_p$')
-            plt.legend(loc='best')
-            plt.grid()
-        # self.pp.savefig()
 
-        return cp_opt, tsr_opt
+        return cp_opt, tsr_opt, tsr, CP, CT, CQ, pitches
 
     def evaluate_partial_load(self, lambda_opt, Urated, OmegaMin, OmegaMax, eta_elec):
 
@@ -360,6 +408,7 @@ class CCBladeEvaluator(Component):
 
         pitch_angles = np.zeros_like(U_oper)
         cp = np.zeros_like(U_oper)
+        P = np.zeros_like(U_oper)
         aeloads = np.zeros((len(self.r), 2, len(U_oper)))
         #Np = np.zeros_like(U_oper)
         #Tp = np.zeros_like(U_oper)
@@ -387,11 +436,20 @@ class CCBladeEvaluator(Component):
                 P, _, _ = self.rotor.evaluate([U], [Omega], [pitch])
                 P_diff = P - P_goal
                 return abs(P_diff)
+
+            # do not pitch when omega is controlled
+            '''
+            if Omega < OmegaMax:
+                pitch = 0.
+            else:
+            '''
             pitch = optimize.brent(
                 min_func, brack=(pitch_init, pitch_init + 1))
 
             cp[i], _, _ = self.rotor.evaluate(
                 [U], [Omega], [pitch], coefficient=True)
+            P[i], _, _ = self.rotor.evaluate(
+                [U], [Omega], [pitch], coefficient=False)
             aeloads[:, 0, i], aeloads[:, 1, i] = self.rotor.distributedAeroLoads(
                 U, Omega, pitch, azimuth=90.0)
             #aeloads[:, 0, i] = Np[i]
@@ -413,7 +471,7 @@ class CCBladeEvaluator(Component):
             plt.legend(loc='best')
             plt.grid()
 
-        return pitch_angles, cp, aeloads, tsr, Omega_oper
+        return pitch_angles, cp, aeloads, tsr, Omega_oper, P
 
     def evaluate_omega(self):
         print 'check'
