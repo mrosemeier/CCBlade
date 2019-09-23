@@ -193,7 +193,8 @@ class CCBladeEvaluator(Component):
         lambda_opt = tsr_opt[0]  # at pitch zero
 
         # create wind speed vector
-        U_oper = np.linspace(self.Uin, self.Uout, self.nv)
+        #U_oper = np.linspace(self.Uin, self.Uout, self.nv)
+        U_oper = np.linspace(self.Ustart_eval, self.Ustop_eval, self.nv)
 
         # create operating conditions
         pitch_angles, cp, aeloads, tsr, omega, P = self.evaluate_steady_states(
@@ -385,8 +386,8 @@ class CCBladeEvaluator(Component):
 
     def evaluate_steady_states(self, P_elec, eta_elec, lambda_opt, OmegaMin, OmegaMax, U_oper):
 
-        Uin = U_oper[0]
-        Uout = U_oper[-1]
+        Uin = self.Uin  # U_oper[0]
+        Uout = self.Uout  # U_oper[-1]
         Omega_oper = np.zeros_like(U_oper)
         for i, U in enumerate(U_oper):
             Omega = U_oper[i] * 30.0 / np.pi * lambda_opt / self.Rtip
