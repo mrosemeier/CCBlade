@@ -26,6 +26,9 @@ class CCBladeEvaluator(Component):
         self.pitches_cp_end = 30
         self.npitches_cp = 10
 
+        self.use_pitch_oper = False
+        self.pitch_oper = np.array([])
+
         #self.blend_var = config['CCBlade']['blend_var']
 
         self.af_name_base = 'cs_'
@@ -198,7 +201,7 @@ class CCBladeEvaluator(Component):
 
         # create operating conditions
         pitch_angles, cp, aeloads, tsr, omega, P = self.evaluate_steady_states(
-            P_elec=self.P_elec, eta_elec=self.eta_elec, lambda_opt=lambda_opt, OmegaMin=self.OmegaMin, OmegaMax=self.OmegaMax, U_oper=U_oper)
+            P_elec=self.P_elec, eta_elec=self.eta_elec, lambda_opt=lambda_opt, OmegaMin=self.OmegaMin, OmegaMax=self.OmegaMax, U_oper=U_oper, use_pitch_oper=self.use_pitch_oper, pitch_oper=self.pitch_oper)
         # self.pp.close()
 
         # get u_rated
@@ -384,7 +387,7 @@ class CCBladeEvaluator(Component):
 
         return aeloads_ult
 
-    def evaluate_steady_states(self, P_elec, eta_elec, lambda_opt, OmegaMin, OmegaMax, U_oper):
+    def evaluate_steady_states(self, P_elec, eta_elec, lambda_opt, OmegaMin, OmegaMax, U_oper, use_pitch_oper, pitch_oper):
 
         Uin = self.Uin  # U_oper[0]
         Uout = self.Uout  # U_oper[-1]
@@ -421,31 +424,34 @@ class CCBladeEvaluator(Component):
             if U < Uin or U > Uout:
                 P_goal = 0
 
-            # pitch_init2 = pitch_init - 1.0  # second closest
-            pitch = pitch_init
+            if not use_pitch_oper:
+                # pitch_init2 = pitch_init - 1.0  # second closest
+                pitch = pitch_init
 
-            def min_func(pitch):
-                ''' function to be minimized
+                def min_func(pitch):
+                    ''' function to be minimized
+                    '''
+                    """
+                    U_p_tsr_opt = Omega * np.pi / 30.0 * self.Rtip / lambda_opt
+                    P_tsr_opt, _, _ = self.rotor.evaluate(
+                        [U_p_tsr_opt], [Omega], [pitch])
+                    if P_tsr_opt < P_rated:
+                        P_goal = P_tsr_opt
+                    """
+                    P, _, _ = self.rotor.evaluate([U], [Omega], [pitch])
+                    P_diff = P - P_goal
+                    return abs(P_diff)
+
+                # do not pitch when omega is controlled
                 '''
-                """
-                U_p_tsr_opt = Omega * np.pi / 30.0 * self.Rtip / lambda_opt
-                P_tsr_opt, _, _ = self.rotor.evaluate(
-                    [U_p_tsr_opt], [Omega], [pitch])
-                if P_tsr_opt < P_rated:
-                    P_goal = P_tsr_opt
-                """
-                P, _, _ = self.rotor.evaluate([U], [Omega], [pitch])
-                P_diff = P - P_goal
-                return abs(P_diff)
-
-            # do not pitch when omega is controlled
-            '''
-            if Omega < OmegaMax:
-                pitch = 0.
+                if Omega < OmegaMax:
+                    pitch = 0.
+                else:
+                '''
+                pitch = optimize.brent(
+                    min_func, brack=(pitch_init, pitch_init + 1))
             else:
-            '''
-            pitch = optimize.brent(
-                min_func, brack=(pitch_init, pitch_init + 1))
+                pitch = pitch_oper[i]
 
             cp[i], _, _ = self.rotor.evaluate(
                 [U], [Omega], [pitch], coefficient=True)
